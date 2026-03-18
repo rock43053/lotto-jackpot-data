@@ -45,11 +45,9 @@ jobs:
               const mmRes = await fetch('https://api.collectapi.com/chancegame/usaMegaMillions', options);
               const mmData = await mmRes.json();
               
-              // 🟢 FIX 1: Ignore their broken "success" flag. Just check if the data exists.
               if (!pbData.result) throw new Error("Powerball data missing: " + JSON.stringify(pbData));
               if (!mmData.result) throw new Error("Mega Millions data missing: " + JSON.stringify(mmData));
               
-              // 🟢 FIX 2: Check for both "nextJackpot" and "next-jackpot" spellings.
               const pbRaw = pbData.result?.['next-jackpot']?.amount || pbData.result?.nextJackpot?.amount || pbData.result?.jackpot;
               const mmRaw = mmData.result?.['next-jackpot']?.amount || mmData.result?.nextJackpot?.amount || mmData.result?.jackpot;
               
@@ -57,21 +55,35 @@ jobs:
                   throw new Error("Amounts missing! PB: " + JSON.stringify(pbData) + " MM: " + JSON.stringify(mmData));
               }
               
-              function cleanAmount(str) {
-                let num = parseFloat(str.replace(/[^0-9.]/g, ''));
-                if (str.toLowerCase().includes('billion')) num *= 1000000000;
-                else if (str.toLowerCase().includes('million')) num *= 1000000;
-                return num;
+              // 🟢 THE FIX: Extract ALL numbers in the string (Annuity + Cash)
+              function extractAmounts(str) {
+                // This regex finds numbers and looks for "million" or "billion" next to them
+                const regex = /([0-9.]+)\s*(million|billion|m|b)?/gi;
+                let matches = [...String(str).matchAll(regex)];
+                
+                let results = [];
+                for (let match of matches) {
+                    let num = parseFloat(match[1]);
+                    let multiplier = match[2] ? match[2].toLowerCase() : '';
+                    if (multiplier.includes('b')) num *= 1000000000;
+                    else if (multiplier.includes('m')) num *= 1000000;
+                    results.push(num);
+                }
+                
+                return {
+                    annuity: results.length > 0 ? results[0] : 0,
+                    cash: results.length > 1 ? results[1] : null // Saves as null if CollectAPI didn't send a second number
+                };
               }
               
               const newData = {
-                powerball: cleanAmount(pbRaw),
-                megaMillions: cleanAmount(mmRaw),
+                powerball: extractAmounts(pbRaw),
+                megaMillions: extractAmounts(mmRaw),
                 lastUpdated: new Date().toISOString()
               };
               
               fs.writeFileSync('jackpots.json', JSON.stringify(newData, null, 2));
-              console.log("Successfully updated jackpots.json:", newData);
+              console.log("Successfully updated jackpots.json:", JSON.stringify(newData, null, 2));
               
             } catch (error) {
               console.error("API Fetch Failed:", error);
