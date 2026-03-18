@@ -3,10 +3,12 @@ name: Auto-Update Jackpots
 # This tells the script WHEN to run
 on:
   schedule:
-    # Runs automatically at 10:00 AM UTC every Thursday and Sunday
-    # This ensures it captures the numbers the morning after the drawings!
     - cron: '0 10 * * 0,4'
-  workflow_dispatch: # This adds a manual "Run workflow" button for you to test it!
+  workflow_dispatch: 
+
+# 🟢 THE FIX: This gives the script permission to save the new jackpots.json file
+permissions:
+  contents: write
 
 jobs:
   update-data:
@@ -18,7 +20,6 @@ jobs:
       - name: Fetch API and Update JSON
         uses: actions/github-script@v7
         env:
-          # This securely pulls the key from your GitHub Secrets vault
           COLLECT_API_KEY: ${{ secrets.COLLECT_API_KEY }}
         with:
           script: |
