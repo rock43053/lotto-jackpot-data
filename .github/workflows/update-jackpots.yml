@@ -23,7 +23,6 @@ jobs:
           script: |
             const fs = require('fs');
             
-            // 🟢 FIX 1: Prevent "apikey apikey" double-prefix
             let rawKey = process.env.COLLECT_API_KEY.trim();
             if (rawKey.toLowerCase().startsWith('apikey ')) {
                 rawKey = rawKey.substring(7).trim();
@@ -42,18 +41,17 @@ jobs:
               const pbRes = await fetch('https://api.collectapi.com/chancegame/usaPowerball', options);
               const pbData = await pbRes.json();
               
-              // 🟢 FIX 3: Catch exact API rejections (like Bad Key or Free Limit Reached)
-              if (!pbData.success) throw new Error("CollectAPI Powerball Error: " + JSON.stringify(pbData));
-              
               console.log("Fetching Mega Millions...");
               const mmRes = await fetch('https://api.collectapi.com/chancegame/usaMegaMillions', options);
               const mmData = await mmRes.json();
               
-              if (!mmData.success) throw new Error("CollectAPI Mega Millions Error: " + JSON.stringify(mmData));
+              // 🟢 FIX 1: Ignore their broken "success" flag. Just check if the data exists.
+              if (!pbData.result) throw new Error("Powerball data missing: " + JSON.stringify(pbData));
+              if (!mmData.result) throw new Error("Mega Millions data missing: " + JSON.stringify(mmData));
               
-              // 🟢 FIX 2: Fallback to current jackpot if "next-jackpot" is temporarily missing
-              const pbRaw = pbData.result['next-jackpot']?.amount || pbData.result.jackpot;
-              const mmRaw = mmData.result['next-jackpot']?.amount || mmData.result.jackpot;
+              // 🟢 FIX 2: Check for both "nextJackpot" and "next-jackpot" spellings.
+              const pbRaw = pbData.result?.['next-jackpot']?.amount || pbData.result?.nextJackpot?.amount || pbData.result?.jackpot;
+              const mmRaw = mmData.result?.['next-jackpot']?.amount || mmData.result?.nextJackpot?.amount || mmData.result?.jackpot;
               
               if (!pbRaw || !mmRaw) {
                   throw new Error("Amounts missing! PB: " + JSON.stringify(pbData) + " MM: " + JSON.stringify(mmData));
