@@ -1,12 +1,10 @@
 name: Auto-Update Jackpots
 
-# This tells the script WHEN to run
 on:
   schedule:
     - cron: '0 10 * * 0,4'
   workflow_dispatch: 
 
-# 🟢 THE FIX: This gives the script permission to save the new jackpots.json file
 permissions:
   contents: write
 
@@ -25,28 +23,42 @@ jobs:
           script: |
             const fs = require('fs');
             
+            // 🟢 FIX 1: Prevent "apikey apikey" double-prefix
+            let rawKey = process.env.COLLECT_API_KEY.trim();
+            if (rawKey.toLowerCase().startsWith('apikey ')) {
+                rawKey = rawKey.substring(7).trim();
+            }
+            
             const options = {
               method: 'GET',
               headers: {
-                'authorization': `apikey ${process.env.COLLECT_API_KEY}`,
+                'authorization': `apikey ${rawKey}`,
                 'content-type': 'application/json'
               }
             };
             
             try {
-              // 1. Fetch Powerball
+              console.log("Fetching Powerball...");
               const pbRes = await fetch('https://api.collectapi.com/chancegame/usaPowerball', options);
               const pbData = await pbRes.json();
               
-              // 2. Fetch Mega Millions
+              // 🟢 FIX 3: Catch exact API rejections (like Bad Key or Free Limit Reached)
+              if (!pbData.success) throw new Error("CollectAPI Powerball Error: " + JSON.stringify(pbData));
+              
+              console.log("Fetching Mega Millions...");
               const mmRes = await fetch('https://api.collectapi.com/chancegame/usaMegaMillions', options);
               const mmData = await mmRes.json();
               
-              // 3. Extract the amounts
-              const pbRaw = pbData.result['next-jackpot'].amount;
-              const mmRaw = mmData.result['next-jackpot'].amount;
+              if (!mmData.success) throw new Error("CollectAPI Mega Millions Error: " + JSON.stringify(mmData));
               
-              // Helper to convert strings like "$100,000,000" into pure numbers
+              // 🟢 FIX 2: Fallback to current jackpot if "next-jackpot" is temporarily missing
+              const pbRaw = pbData.result['next-jackpot']?.amount || pbData.result.jackpot;
+              const mmRaw = mmData.result['next-jackpot']?.amount || mmData.result.jackpot;
+              
+              if (!pbRaw || !mmRaw) {
+                  throw new Error("Amounts missing! PB: " + JSON.stringify(pbData) + " MM: " + JSON.stringify(mmData));
+              }
+              
               function cleanAmount(str) {
                 let num = parseFloat(str.replace(/[^0-9.]/g, ''));
                 if (str.toLowerCase().includes('billion')) num *= 1000000000;
@@ -54,14 +66,12 @@ jobs:
                 return num;
               }
               
-              // 4. Create the new JSON format
               const newData = {
                 powerball: cleanAmount(pbRaw),
                 megaMillions: cleanAmount(mmRaw),
                 lastUpdated: new Date().toISOString()
               };
               
-              // 5. Overwrite the file
               fs.writeFileSync('jackpots.json', JSON.stringify(newData, null, 2));
               console.log("Successfully updated jackpots.json:", newData);
               
@@ -75,6 +85,4 @@ jobs:
           git config --global user.name "Jackpot Bot"
           git config --global user.email "bot@example.com"
           git add jackpots.json
-          
-          # Only commit if the numbers actually changed
           git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-updated jackpots" && git push)
