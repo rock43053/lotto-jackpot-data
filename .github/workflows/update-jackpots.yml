@@ -1,0 +1,79 @@
+name: Auto-Update Jackpots
+
+# This tells the script WHEN to run
+on:
+  schedule:
+    # Runs automatically at 10:00 AM UTC every Thursday and Sunday
+    # This ensures it captures the numbers the morning after the drawings!
+    - cron: '0 10 * * 0,4'
+  workflow_dispatch: # This adds a manual "Run workflow" button for you to test it!
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Fetch API and Update JSON
+        uses: actions/github-script@v7
+        env:
+          # This securely pulls the key from your GitHub Secrets vault
+          COLLECT_API_KEY: ${{ secrets.COLLECT_API_KEY }}
+        with:
+          script: |
+            const fs = require('fs');
+            
+            const options = {
+              method: 'GET',
+              headers: {
+                'authorization': `apikey ${process.env.COLLECT_API_KEY}`,
+                'content-type': 'application/json'
+              }
+            };
+            
+            try {
+              // 1. Fetch Powerball
+              const pbRes = await fetch('https://api.collectapi.com/chancegame/usaPowerball', options);
+              const pbData = await pbRes.json();
+              
+              // 2. Fetch Mega Millions
+              const mmRes = await fetch('https://api.collectapi.com/chancegame/usaMegaMillions', options);
+              const mmData = await mmRes.json();
+              
+              // 3. Extract the amounts
+              const pbRaw = pbData.result['next-jackpot'].amount;
+              const mmRaw = mmData.result['next-jackpot'].amount;
+              
+              // Helper to convert strings like "$100,000,000" into pure numbers
+              function cleanAmount(str) {
+                let num = parseFloat(str.replace(/[^0-9.]/g, ''));
+                if (str.toLowerCase().includes('billion')) num *= 1000000000;
+                else if (str.toLowerCase().includes('million')) num *= 1000000;
+                return num;
+              }
+              
+              // 4. Create the new JSON format
+              const newData = {
+                powerball: cleanAmount(pbRaw),
+                megaMillions: cleanAmount(mmRaw),
+                lastUpdated: new Date().toISOString()
+              };
+              
+              // 5. Overwrite the file
+              fs.writeFileSync('jackpots.json', JSON.stringify(newData, null, 2));
+              console.log("Successfully updated jackpots.json:", newData);
+              
+            } catch (error) {
+              console.error("API Fetch Failed:", error);
+              process.exit(1);
+            }
+
+      - name: Commit and Push Changes
+        run: |
+          git config --global user.name "Jackpot Bot"
+          git config --global user.email "bot@example.com"
+          git add jackpots.json
+          
+          # Only commit if the numbers actually changed
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-updated jackpots" && git push)
