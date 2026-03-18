@@ -1,8 +1,7 @@
 name: Auto-Update Jackpots
 
 on:
- schedule:
-    # Runs at 7:00 AM UTC (2:00 AM / 3:00 AM Eastern) on Tue, Wed, Thu, Sat, Sun
+  schedule:
     - cron: '0 7 * * 0,2,3,4,6'
   workflow_dispatch: 
 
@@ -56,9 +55,8 @@ jobs:
                   throw new Error("Amounts missing! PB: " + JSON.stringify(pbData) + " MM: " + JSON.stringify(mmData));
               }
               
-              // 🟢 THE FIX: Extract ALL numbers in the string (Annuity + Cash)
+              // Extract ALL numbers in the string (Annuity + Cash)
               function extractAmounts(str) {
-                // This regex finds numbers and looks for "million" or "billion" next to them
                 const regex = /([0-9.]+)\s*(million|billion|m|b)?/gi;
                 let matches = [...String(str).matchAll(regex)];
                 
@@ -73,7 +71,7 @@ jobs:
                 
                 return {
                     annuity: results.length > 0 ? results[0] : 0,
-                    cash: results.length > 1 ? results[1] : null // Saves as null if CollectAPI didn't send a second number
+                    cash: results.length > 1 ? results[1] : null
                 };
               }
               
