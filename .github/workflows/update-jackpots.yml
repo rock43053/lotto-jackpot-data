@@ -2,8 +2,13 @@ name: Auto-Update Jackpots
 
 on:
   schedule:
-    - cron: '0 7 * * 0,2,3,4,6'
-  workflow_dispatch: 
+    # Every 3 hours, every day. Powerball draws Mon/Wed/Sat and Mega Millions
+    # Tue/Fri (~03:00 UTC the next morning), so this keeps jackpots.json current
+    # within a few hours of any draw and removes the old Mon/Fri blind spots that
+    # made the feed lag ~1.5 days. ~16 CollectAPI calls/day — widen the interval
+    # (e.g. '0 */6 * * *') if you hit API limits.
+    - cron: '0 */3 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: write
