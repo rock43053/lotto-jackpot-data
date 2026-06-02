@@ -2,12 +2,14 @@ name: Auto-Update Jackpots
 
 on:
   schedule:
-    # Every 3 hours, every day. Powerball draws Mon/Wed/Sat and Mega Millions
-    # Tue/Fri (~03:00 UTC the next morning), so this keeps jackpots.json current
-    # within a few hours of any draw and removes the old Mon/Fri blind spots that
-    # made the feed lag ~1.5 days. ~16 CollectAPI calls/day — widen the interval
-    # (e.g. '0 */6 * * *') if you hit API limits.
-    - cron: '0 */3 * * *'
+    # Twice a day, every day — tuned to the lottery, not a blind interval:
+    #   09:00 UTC (~05:00 ET) catches the new estimate the morning after each draw
+    #                         (Powerball Mon/Wed/Sat, Mega Millions Tue/Fri).
+    #   21:00 UTC (~17:00 ET) catches same-day estimate revisions before a draw.
+    # Cost: 2 runs/day x 2 calls (Powerball + Mega) = 4 calls/day ~= 122/month,
+    # well under the 500/month CollectAPI plan (leaves headroom for manual runs).
+    # Drop to '0 9 * * *' for ~61/month, or add a time to refresh more often.
+    - cron: '0 9,21 * * *'
   workflow_dispatch:
 
 permissions:
