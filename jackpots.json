@@ -1,11 +1,11 @@
 {
   "powerball": {
-    "annuity": 238000000,
-    "cash": 106100000
+    "annuity": 258000000,
+    "cash": 115000000
   },
   "megaMillions": {
     "annuity": 413000000,
     "cash": null
   },
-  "lastUpdated": "2026-06-11T12:38:25.385Z"
+  "lastUpdated": "2026-06-11T22:47:50.765Z"
 }
