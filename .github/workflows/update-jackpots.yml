@@ -9,7 +9,7 @@ on:
     # Cost: 2 runs/day x 2 calls (Powerball + Mega) = 4 calls/day ~= 122/month,
     # well under the 500/month CollectAPI plan (leaves headroom for manual runs).
     # Drop to '0 9 * * *' for ~61/month, or add a time to refresh more often.
-    - cron: '0 9,21 * * *'
+    - cron: '0 5,9,21 * * *'
   workflow_dispatch:
 
 permissions:
