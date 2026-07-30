@@ -1,14 +1,20 @@
 name: Auto-Update Jackpots
 
+# Sources are the lotteries' OWN sites — free, no API key, no quota:
+#   Powerball     — powerball.com homepage ("Estimated Jackpot $X Million/Billion",
+#                   "Cash Value $X Million/Billion" in dedicated elements)
+#   Mega Millions — megamillions.com's official JSON service (GetLatestDrawData:
+#                   Jackpot.NextPrizePool / NextCashValue)
+# Replaced the paid CollectAPI plan on 2026-07-31. Output shape is unchanged,
+# so every shipped app version keeps working. If a fetch or sanity check fails,
+# the job exits WITHOUT committing and the apps keep the last good values.
+
 on:
   schedule:
-    # Twice a day, every day — tuned to the lottery, not a blind interval:
-    #   09:00 UTC (~05:00 ET) catches the new estimate the morning after each draw
-    #                         (Powerball Mon/Wed/Sat, Mega Millions Tue/Fri).
-    #   21:00 UTC (~17:00 ET) catches same-day estimate revisions before a draw.
-    # Cost: 2 runs/day x 2 calls (Powerball + Mega) = 4 calls/day ~= 122/month,
-    # well under the 500/month CollectAPI plan (leaves headroom for manual runs).
-    # Drop to '0 9 * * *' for ~61/month, or add a time to refresh more often.
+    # Three times a day, tuned to how the estimate actually moves:
+    #   ~05:00 & 09:00 UTC catch the new estimate posted the morning after each
+    #   draw (Powerball Mon/Wed/Sat, Mega Tue/Fri); 21:00 UTC (~17:00 ET)
+    #   catches same-day upward revisions before a draw.
     - cron: '0 5,9,21 * * *'
   workflow_dispatch:
 
@@ -22,79 +28,73 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Fetch API and Update JSON
+      - name: Fetch official sources and update JSON
         uses: actions/github-script@v7
-        env:
-          COLLECT_API_KEY: ${{ secrets.COLLECT_API_KEY }}
         with:
           script: |
             const fs = require('fs');
-            
-            let rawKey = process.env.COLLECT_API_KEY.trim();
-            if (rawKey.toLowerCase().startsWith('apikey ')) {
-                rawKey = rawKey.substring(7).trim();
+            const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
+
+            function toNumber(numStr, unit) {
+              let n = parseFloat(numStr.replace(/,/g, ''));
+              const u = (unit || '').toLowerCase();
+              if (u.startsWith('b')) n *= 1e9;
+              else if (u.startsWith('m')) n *= 1e6;
+              return n;
             }
-            
-            const options = {
-              method: 'GET',
-              headers: {
-                'authorization': `apikey ${rawKey}`,
-                'content-type': 'application/json'
-              }
+
+            // Guard against a page redesign silently feeding garbage to the
+            // apps: values must look like real lottery jackpots.
+            function sane(g) {
+              return g && Number.isFinite(g.annuity) &&
+                     g.annuity >= 1e6 && g.annuity <= 1e10 &&
+                     (g.cash == null || (g.cash > 0 && g.cash < g.annuity));
+            }
+
+            // ---- Powerball: official homepage ----
+            console.log('Fetching powerball.com…');
+            const pbRes = await fetch('https://www.powerball.com/', {
+              headers: { 'user-agent': UA, 'accept': 'text/html' }
+            });
+            if (!pbRes.ok) throw new Error('powerball.com HTTP ' + pbRes.status);
+            const pbHtml = (await pbRes.text()).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+            const pbJack = pbHtml.match(/Estimated Jackpot\s*\$\s*([\d.,]+)\s*(Million|Billion)/i);
+            const pbCash = pbHtml.match(/Cash Value\s*\$\s*([\d.,]+)\s*(Million|Billion)/i);
+            if (!pbJack) throw new Error('Powerball jackpot not found on page — layout may have changed');
+            const powerball = {
+              annuity: toNumber(pbJack[1], pbJack[2]),
+              cash: pbCash ? toNumber(pbCash[1], pbCash[2]) : null
             };
-            
+
+            // ---- Mega Millions: official JSON service ----
+            console.log('Fetching megamillions.com…');
+            const mmRes = await fetch('https://www.megamillions.com/cmspages/utilservice.asmx/GetLatestDrawData', {
+              headers: { 'user-agent': UA }
+            });
+            if (!mmRes.ok) throw new Error('megamillions.com HTTP ' + mmRes.status);
+            const mmXml = await mmRes.text();
+            const mmJson = JSON.parse(mmXml.substring(mmXml.indexOf('{'), mmXml.lastIndexOf('}') + 1));
+            const megaMillions = {
+              annuity: mmJson.Jackpot?.NextPrizePool ?? null,
+              cash: mmJson.Jackpot?.NextCashValue ?? null
+            };
+
+            if (!sane(powerball)) throw new Error('Powerball failed sanity check: ' + JSON.stringify(powerball));
+            if (!sane(megaMillions)) throw new Error('Mega Millions failed sanity check: ' + JSON.stringify(megaMillions));
+
+            // Preserve manually-added fields (e.g. "notice" for in-app
+            // broadcasts) instead of clobbering them on every run.
+            let extra = {};
             try {
-              console.log("Fetching Powerball...");
-              const pbRes = await fetch('https://api.collectapi.com/chancegame/usaPowerball', options);
-              const pbData = await pbRes.json();
-              
-              console.log("Fetching Mega Millions...");
-              const mmRes = await fetch('https://api.collectapi.com/chancegame/usaMegaMillions', options);
-              const mmData = await mmRes.json();
-              
-              if (!pbData.result) throw new Error("Powerball data missing: " + JSON.stringify(pbData));
-              if (!mmData.result) throw new Error("Mega Millions data missing: " + JSON.stringify(mmData));
-              
-              const pbRaw = pbData.result?.['next-jackpot']?.amount || pbData.result?.nextJackpot?.amount || pbData.result?.jackpot;
-              const mmRaw = mmData.result?.['next-jackpot']?.amount || mmData.result?.nextJackpot?.amount || mmData.result?.jackpot;
-              
-              if (!pbRaw || !mmRaw) {
-                  throw new Error("Amounts missing! PB: " + JSON.stringify(pbData) + " MM: " + JSON.stringify(mmData));
+              const prev = JSON.parse(fs.readFileSync('jackpots.json', 'utf8'));
+              for (const k of Object.keys(prev)) {
+                if (!['powerball', 'megaMillions', 'lastUpdated'].includes(k)) extra[k] = prev[k];
               }
-              
-              // Extract ALL numbers in the string (Annuity + Cash)
-              function extractAmounts(str) {
-                const regex = /([0-9.]+)\s*(million|billion|m|b)?/gi;
-                let matches = [...String(str).matchAll(regex)];
-                
-                let results = [];
-                for (let match of matches) {
-                    let num = parseFloat(match[1]);
-                    let multiplier = match[2] ? match[2].toLowerCase() : '';
-                    if (multiplier.includes('b')) num *= 1000000000;
-                    else if (multiplier.includes('m')) num *= 1000000;
-                    results.push(num);
-                }
-                
-                return {
-                    annuity: results.length > 0 ? results[0] : 0,
-                    cash: results.length > 1 ? results[1] : null
-                };
-              }
-              
-              const newData = {
-                powerball: extractAmounts(pbRaw),
-                megaMillions: extractAmounts(mmRaw),
-                lastUpdated: new Date().toISOString()
-              };
-              
-              fs.writeFileSync('jackpots.json', JSON.stringify(newData, null, 2));
-              console.log("Successfully updated jackpots.json:", JSON.stringify(newData, null, 2));
-              
-            } catch (error) {
-              console.error("API Fetch Failed:", error);
-              process.exit(1);
-            }
+            } catch (e) { /* first run or malformed previous file */ }
+
+            const newData = { powerball, megaMillions, lastUpdated: new Date().toISOString(), ...extra };
+            fs.writeFileSync('jackpots.json', JSON.stringify(newData, null, 2));
+            console.log('Updated jackpots.json:', JSON.stringify(newData, null, 2));
 
       - name: Commit and Push Changes
         run: |
