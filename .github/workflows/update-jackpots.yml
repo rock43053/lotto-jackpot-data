@@ -8,6 +8,7 @@ name: Auto-Update Jackpots
 # Replaced the paid CollectAPI plan on 2026-07-31. Output shape is unchanged,
 # so every shipped app version keeps working. If a fetch or sanity check fails,
 # the job exits WITHOUT committing and the apps keep the last good values.
+# Transient fetch errors (HTTP 5xx, 429, timeouts) are retried first.
 
 on:
   schedule:
@@ -35,6 +36,29 @@ jobs:
             const fs = require('fs');
             const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 
+            // RETRY-START
+            // powerball.com returned one HTTP 502 and failed the whole job.
+            // Retry only failures that usually clear up by themselves: network
+            // errors, timeouts, HTTP 429 and 5xx. Other statuses fail at once.
+            async function fetchWithRetry(url, init, label, delaysMs = [15000, 45000, 90000]) {
+              for (let attempt = 0; ; attempt++) {
+                let problem;
+                let retryable = true;
+                try {
+                  const res = await fetch(url, { ...init, signal: AbortSignal.timeout(30000) });
+                  if (res.ok) return res;
+                  problem = label + ' HTTP ' + res.status;
+                  retryable = res.status === 429 || res.status >= 500;
+                } catch (e) {
+                  problem = label + ' request failed: ' + e.message;
+                }
+                if (!retryable || attempt >= delaysMs.length) throw new Error(problem);
+                console.log(problem + ' (attempt ' + (attempt + 1) + '), retrying in ' + delaysMs[attempt] / 1000 + 's');
+                await new Promise(resolve => setTimeout(resolve, delaysMs[attempt]));
+              }
+            }
+            // RETRY-END
+
             function toNumber(numStr, unit) {
               let n = parseFloat(numStr.replace(/,/g, ''));
               const u = (unit || '').toLowerCase();
@@ -53,10 +77,9 @@ jobs:
 
             // ---- Powerball: official homepage ----
             console.log('Fetching powerball.com…');
-            const pbRes = await fetch('https://www.powerball.com/', {
+            const pbRes = await fetchWithRetry('https://www.powerball.com/', {
               headers: { 'user-agent': UA, 'accept': 'text/html' }
-            });
-            if (!pbRes.ok) throw new Error('powerball.com HTTP ' + pbRes.status);
+            }, 'powerball.com');
             const pbHtml = (await pbRes.text()).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
             const pbJack = pbHtml.match(/Estimated Jackpot\s*\$\s*([\d.,]+)\s*(Million|Billion)/i);
             const pbCash = pbHtml.match(/Cash Value\s*\$\s*([\d.,]+)\s*(Million|Billion)/i);
@@ -68,10 +91,9 @@ jobs:
 
             // ---- Mega Millions: official JSON service ----
             console.log('Fetching megamillions.com…');
-            const mmRes = await fetch('https://www.megamillions.com/cmspages/utilservice.asmx/GetLatestDrawData', {
+            const mmRes = await fetchWithRetry('https://www.megamillions.com/cmspages/utilservice.asmx/GetLatestDrawData', {
               headers: { 'user-agent': UA }
-            });
-            if (!mmRes.ok) throw new Error('megamillions.com HTTP ' + mmRes.status);
+            }, 'megamillions.com');
             const mmXml = await mmRes.text();
             const mmJson = JSON.parse(mmXml.substring(mmXml.indexOf('{'), mmXml.lastIndexOf('}') + 1));
             const megaMillions = {
