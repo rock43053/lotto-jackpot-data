@@ -9,6 +9,12 @@ name: Auto-Update Jackpots
 # so every shipped app version keeps working. If a fetch or sanity check fails,
 # the job exits WITHOUT committing and the apps keep the last good values.
 # Transient fetch errors (HTTP 5xx, 429, timeouts) are retried first.
+#
+# draws.json (added 2026-11-12, app 5.1.1): the latest draw of each game, its
+# jackpot, and whether it was won and in which states. A Firebase function
+# reads it and sends opted-in users a 9 AM local-time alert. "status" is
+# "pending" until the official sites agree the result is final, and pending
+# results are never announced. Committing "paused": true stops all alerts.
 
 on:
   schedule:
@@ -17,6 +23,9 @@ on:
     #   draw (Powerball Mon/Wed/Sat, Mega Tue/Fri); 21:00 UTC (~17:00 ET)
     #   catches same-day upward revisions before a draw.
     - cron: '0 5,9,21 * * *'
+    # Hourly on the mornings after a draw (UTC Tue/Wed/Thu/Sat/Sun), so draws.json
+    # has the result before 9 AM Eastern. Odd minutes avoid GitHub's busiest slots.
+    - cron: '23 4-13 * * 0,2,3,4,6'
   workflow_dispatch:
 
 permissions:
@@ -30,6 +39,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Fetch official sources and update JSON
+        id: jackpots
         uses: actions/github-script@v7
         with:
           script: |
@@ -118,9 +128,128 @@ jobs:
             fs.writeFileSync('jackpots.json', JSON.stringify(newData, null, 2));
             console.log('Updated jackpots.json:', JSON.stringify(newData, null, 2));
 
+      # Runs after the jackpot step and reads the jackpots.json it just wrote.
+      # If this step fails, the job is marked failed (so the owner is emailed)
+      # but the jackpot update is still committed below.
+      - name: Fetch latest draw results for draws.json
+        id: draws
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
+
+            // Same retry policy as the jackpot step (each step has its own scope).
+            async function fetchWithRetry(url, init, label, delaysMs = [15000, 45000, 90000]) {
+              for (let attempt = 0; ; attempt++) {
+                let problem;
+                let retryable = true;
+                try {
+                  const res = await fetch(url, { ...init, signal: AbortSignal.timeout(30000) });
+                  if (res.ok) return res;
+                  problem = label + ' HTTP ' + res.status;
+                  retryable = res.status === 429 || res.status >= 500;
+                } catch (e) {
+                  problem = label + ' request failed: ' + e.message;
+                }
+                if (!retryable || attempt >= delaysMs.length) throw new Error(problem);
+                console.log(problem + ' (attempt ' + (attempt + 1) + '), retrying in ' + delaysMs[attempt] / 1000 + 's');
+                await new Promise(resolve => setTimeout(resolve, delaysMs[attempt]));
+              }
+            }
+            function toNumber(numStr, unit) {
+              let n = parseFloat(numStr.replace(/,/g, ''));
+              const u = (unit || '').toLowerCase();
+              if (u.startsWith('b')) n *= 1e9;
+              else if (u.startsWith('m')) n *= 1e6;
+              return n;
+            }
+            const DAY = /^\d{4}-\d{2}-\d{2}$/;
+            const sane = n => Number.isFinite(n) && n >= 1e6 && n <= 1e10;
+            function codes(list, label) {
+              const out = [...new Set(list.map(s => String(s).replace(/\(\s*\d+\s*\)/g, '').trim().toUpperCase()).filter(Boolean))];
+              if (!out.length || !out.every(s => /^[A-Z]{2}$/.test(s))) throw new Error(label + ' winner states look wrong: ' + JSON.stringify(list));
+              return out;
+            }
+            const jackpots = JSON.parse(fs.readFileSync('jackpots.json', 'utf8'));
+
+            // ---- Powerball: official draw-result page (latest draw) ----
+            // "JACKPOT WINNERS" lists state codes ("MO, TX") or "None". "None" is
+            // only final once the homepage estimate has rolled past this draw's
+            // jackpot; until then (or after a reset) the result stays pending.
+            const pbRes = await fetchWithRetry('https://www.powerball.com/draw-result?gc=powerball', {
+              headers: { 'user-agent': UA, 'accept': 'text/html' }
+            }, 'powerball.com draw-result');
+            const pbHtml = await pbRes.text();
+            const pbDate = (pbHtml.match(/id="DrawDate"[^>]*value="(\d{4}-\d{2}-\d{2})"/) || [])[1];
+            const pbJack = pbHtml.match(/Estimated Jackpot:\s*<\/span>\s*<span>\s*\$\s*([\d.,]+)\s*(Million|Billion)/i);
+            const pbWin = pbHtml.match(/JACKPOT WINNERS\s*<\/span>\s*<span class="winner-location[^"]*">([\s\S]*?)<\/span>/i);
+            if (!pbDate || !pbJack || !pbWin) throw new Error('Powerball draw result not found on page — layout may have changed');
+            const pbText = pbWin[1].replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+            const powerball = { drawDate: pbDate, jackpot: toNumber(pbJack[1], pbJack[2]), status: 'pending', states: [],
+              nextJackpot: jackpots.powerball?.annuity ?? null };
+            if (/^none$/i.test(pbText)) {
+              if (sane(powerball.nextJackpot) && powerball.nextJackpot > powerball.jackpot) powerball.status = 'notWon';
+            } else {
+              powerball.states = codes(pbText.split(','), 'Powerball');
+              powerball.status = 'won';
+            }
+
+            // ---- Mega Millions: official JSON service (latest draw) ----
+            // Jackpot winners appear in MatchWinnersLocation with a PrizeLevel
+            // containing "Jackpot" ("Match 5 + 1: Jackpot"). Jackpot.Winners
+            // stays 0 even on won draws, so it is not used.
+            const mmRes = await fetchWithRetry('https://www.megamillions.com/cmspages/utilservice.asmx/GetLatestDrawData', {
+              headers: { 'user-agent': UA }
+            }, 'megamillions.com');
+            const mmXml = await mmRes.text();
+            const mm = JSON.parse(mmXml.substring(mmXml.indexOf('{'), mmXml.lastIndexOf('}') + 1));
+            const mmDate = String(mm.Drawing?.PlayDate || '').slice(0, 10);
+            const jp = mm.Jackpot || {};
+            if (!DAY.test(mmDate)) throw new Error('Mega Millions draw date missing — service may have changed');
+            const megaMillions = { drawDate: mmDate, jackpot: jp.CurrentPrizePool, status: 'pending', states: [],
+              nextJackpot: jp.NextPrizePool ?? null };
+            const sameDraw = String(jp.PlayDate || '').slice(0, 10) === mmDate;
+            const jpWinners = (mm.MatchWinnersLocation || []).filter(w =>
+              /jackpot/i.test(String(w.PrizeLevel || '')) && String(w.PlayDate || '').slice(0, 10) === mmDate);
+            const tierZero = (mm.PrizeTiers || []).filter(t => t.Tier === 0 && String(t.PlayDate || '').slice(0, 10) === mmDate)
+              .reduce((sum, t) => sum + (Number(t.Winners) || 0), 0);
+            if (sameDraw && jpWinners.length) {
+              megaMillions.states = codes(jpWinners.map(w => w.StateCode), 'Mega Millions');
+              megaMillions.status = 'won';
+            } else if (sameDraw && jp.Verified === true && tierZero === 0 && sane(jp.NextPrizePool) && jp.NextPrizePool > jp.CurrentPrizePool) {
+              megaMillions.status = 'notWon';
+            }
+
+            for (const [name, r] of [['Powerball', powerball], ['Mega Millions', megaMillions]]) {
+              if (!sane(r.jackpot)) throw new Error(name + ' draw jackpot failed sanity check: ' + JSON.stringify(r));
+            }
+
+            // Keep manual fields (such as "paused"), never move back to an older
+            // draw, and never downgrade a final result to pending.
+            let prev = {};
+            try { prev = JSON.parse(fs.readFileSync('draws.json', 'utf8')); } catch (e) { /* first run */ }
+            function keep(next, old) {
+              if (!old || !DAY.test(old.drawDate || '')) return next;
+              if (next.drawDate < old.drawDate) return old;
+              if (next.drawDate === old.drawDate && next.status === 'pending' && old.status !== 'pending') return old;
+              return next;
+            }
+            const results = { powerball: keep(powerball, prev.powerball), megaMillions: keep(megaMillions, prev.megaMillions) };
+            const extra = {};
+            for (const k of Object.keys(prev)) if (!['powerball', 'megaMillions', 'lastUpdated'].includes(k)) extra[k] = prev[k];
+            const unchanged = JSON.stringify(results.powerball) === JSON.stringify(prev.powerball) &&
+              JSON.stringify(results.megaMillions) === JSON.stringify(prev.megaMillions);
+            if (unchanged) { console.log('draws.json unchanged'); return; }
+            const out = { ...results, lastUpdated: new Date().toISOString(), ...extra };
+            fs.writeFileSync('draws.json', JSON.stringify(out, null, 2));
+            console.log('Updated draws.json:', JSON.stringify(out, null, 2));
+
       - name: Commit and Push Changes
+        if: ${{ always() && steps.jackpots.outcome == 'success' }}
         run: |
           git config --global user.name "Jackpot Bot"
           git config --global user.email "bot@example.com"
           git add jackpots.json
+          if [ -f draws.json ]; then git add draws.json; fi
           git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-updated jackpots" && git push)
