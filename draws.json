@@ -1,12 +1,10 @@
 {
   "powerball": {
-    "drawDate": "2026-11-21",
-    "jackpot": 114000000,
-    "status": "won",
-    "states": [
-      "FL"
-    ],
-    "nextJackpot": 20000000
+    "drawDate": "2026-11-23",
+    "jackpot": 20000000,
+    "status": "notWon",
+    "states": [],
+    "nextJackpot": 31000000
   },
   "megaMillions": {
     "drawDate": "2026-11-20",
@@ -15,5 +13,5 @@
     "states": [],
     "nextJackpot": 645000000
   },
-  "lastUpdated": "2026-11-22T12:41:39.804Z"
+  "lastUpdated": "2026-11-24T14:58:49.761Z"
 }
