@@ -7,11 +7,11 @@
     "nextJackpot": 48000000
   },
   "megaMillions": {
-    "drawDate": "2026-11-24",
-    "jackpot": 645000000,
+    "drawDate": "2026-11-27",
+    "jackpot": 673000000,
     "status": "notWon",
     "states": [],
-    "nextJackpot": 673000000
+    "nextJackpot": 700000000
   },
-  "lastUpdated": "2026-11-26T14:00:23.926Z"
+  "lastUpdated": "2026-11-28T13:14:35.811Z"
 }
